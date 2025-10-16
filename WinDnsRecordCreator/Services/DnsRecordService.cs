@@ -35,13 +35,26 @@ public class DnsRecordService : IDnsRecordService
         var dnsServerName = Environment.MachineName;
         var ipv4Address = ResolveLocalIPv4Address();
 
-        using var recordClass = new ManagementClass($"\\\\{dnsServerName}\\{WmiNamespace}:{RecordClassName}");
+        var managementScope = new ManagementScope($"\\\\{dnsServerName}\\{WmiNamespace}");
+
+        try
+        {
+            managementScope.Connect();
+        }
+        catch (ManagementException ex)
+        {
+            _logger.LogError(ex, "Failed to connect to the DNS WMI provider on server {Server}", dnsServerName);
+            throw new InvalidOperationException($"Failed to connect to the DNS server '{dnsServerName}'.", ex);
+        }
+
+        using var recordClass = new ManagementClass(managementScope, new ManagementPath(RecordClassName), null);
         using var methodParameters = recordClass.GetMethodParameters("CreateInstanceFromPropertyData");
 
         methodParameters["DnsServerName"] = dnsServerName;
         methodParameters["ContainerName"] = ZoneName;
         methodParameters["OwnerName"] = ownerName;
         methodParameters["IPAddress"] = ipv4Address.ToString();
+        methodParameters["TTL"] = 3600u;
 
         _logger.LogInformation("Creating DNS A record {OwnerName} -> {IPAddress} on server {Server}", ownerName, ipv4Address, dnsServerName);
 
