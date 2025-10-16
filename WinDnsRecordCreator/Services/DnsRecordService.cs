@@ -21,86 +21,63 @@ public class DnsRecordService : IDnsRecordService
         _logger = logger;
     }
 
-    public Task<string> CreateARecordAsync(string subdomain, CancellationToken cancellationToken = default)
+    public Task<string> CreateARecordAsync(string subdomain, string ipAddress, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(subdomain))
-        {
             throw new ArgumentException("Subdomain cannot be null or whitespace.", nameof(subdomain));
-        }
-
         cancellationToken.ThrowIfCancellationRequested();
-
+        string zoneName = "mafpars.local";
+        string fqdn = subdomain + "." + zoneName;
         var sanitizedSubdomain = SanitizeSubdomain(subdomain);
-        var ownerName = $"{sanitizedSubdomain}.{ZoneName}";
-        var dnsServerName = Environment.MachineName;
-        var ipv4Address = ResolveLocalIPv4Address();
+        string dnsServer = Environment.MachineName;
+        ManagementScope scope = new ManagementScope($@"\\{dnsServer}\root\MicrosoftDNS");
+        scope.Connect();
 
-        var managementScope = new ManagementScope($"\\\\{dnsServerName}\\{WmiNamespace}");
+        string query = $"SELECT * FROM MicrosoftDNS_AType WHERE OwnerName = '{fqdn}'";
+        ManagementObjectSearcher searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query));
+        ManagementObjectCollection results = searcher.Get();
 
-        try
+        if (results.Count == 0)
         {
-            managementScope.Connect();
+            ManagementClass dnsAClass = new ManagementClass(scope, new ManagementPath("MicrosoftDNS_AType"), null);
+            ManagementBaseObject inParams = dnsAClass.GetMethodParameters("CreateInstanceFromPropertyData");
+            inParams["DnsServerName"] = dnsServer;                         // DNS server name (FQDN or hostname):contentReference[oaicite:6]{index=6}
+            inParams["ContainerName"] = zoneName;                          // DNS zone name (container):contentReference[oaicite:7]{index=7}
+            inParams["OwnerName"] = $"{subdomain}.{zoneName}";           // FQDN of the new record (host.zone):contentReference[oaicite:8]{index=8}
+            inParams["IPAddress"] = ipAddress;                          // IPv4 address for the host record
+            ManagementBaseObject outParams = dnsAClass.InvokeMethod(
+                "CreateInstanceFromPropertyData", inParams, null);
         }
-        catch (ManagementException ex)
+        else if (results.Count > 1)
         {
-            _logger.LogError(ex, "Failed to connect to the DNS WMI provider on server {Server}", dnsServerName);
-            throw new InvalidOperationException($"Failed to connect to the DNS server '{dnsServerName}'.", ex);
+            throw new Exception($"Multiple A records for {fqdn} found; update not performed.");
         }
-
-        using var recordClass = new ManagementClass(managementScope, new ManagementPath(RecordClassName), null);
-        using var methodParameters = recordClass.GetMethodParameters("CreateInstanceFromPropertyData");
-
-        methodParameters["DnsServerName"] = dnsServerName;
-        methodParameters["ContainerName"] = ZoneName;
-        methodParameters["OwnerName"] = ownerName;
-        methodParameters["IPAddress"] = ipv4Address.ToString();
-        methodParameters["TTL"] = 3600u;
-
-        _logger.LogInformation("Creating DNS A record {OwnerName} -> {IPAddress} on server {Server}", ownerName, ipv4Address, dnsServerName);
-
-        try
+        else
         {
-            recordClass.InvokeMethod("CreateInstanceFromPropertyData", methodParameters, null);
-            _logger.LogInformation("Successfully created DNS A record {OwnerName}", ownerName);
+            foreach (ManagementObject record in results)  // there will be exactly one
+            {
+                string currentIp = record["RecordData"]?.ToString();
+                if (currentIp == null)
+                    throw new Exception("Failed to retrieve current IP from DNS record.");
+                if (!currentIp.Equals(ipAddress, StringComparison.OrdinalIgnoreCase))
+                {
+                    ManagementBaseObject inParams = record.GetMethodParameters("Modify");
+                    inParams["IPAddress"] = ipAddress;
+                    record.InvokeMethod("Modify", inParams, null);
+                }
+                break; 
+            }
         }
-        catch (ManagementException ex)
-        {
-            _logger.LogError(ex, "Failed to create DNS A record {OwnerName}", ownerName);
-            throw new InvalidOperationException($"Failed to create DNS A record '{ownerName}'.", ex);
-        }
-
-        return Task.FromResult(ownerName);
+        return Task.FromResult($"{subdomain}.{zoneName}");
     }
 
     private static string SanitizeSubdomain(string value)
     {
         var trimmed = value.Trim().TrimEnd('.');
-
         if (string.IsNullOrWhiteSpace(trimmed))
-        {
             throw new ArgumentException("Subdomain cannot be empty after trimming whitespace and trailing dots.", nameof(value));
-        }
-
         if (trimmed.Any(char.IsWhiteSpace))
-        {
             throw new ArgumentException("Subdomain cannot contain whitespace characters.", nameof(value));
-        }
-
         return trimmed.ToLowerInvariant();
-    }
-
-    private static IPAddress ResolveLocalIPv4Address()
-    {
-        var addresses = Dns.GetHostEntry(Dns.GetHostName())
-            .AddressList
-            .Where(address => address.AddressFamily == AddressFamily.InterNetwork)
-            .ToArray();
-
-        if (addresses.Length == 0)
-        {
-            throw new InvalidOperationException("No IPv4 address was found for the current host.");
-        }
-
-        return addresses[0];
     }
 }

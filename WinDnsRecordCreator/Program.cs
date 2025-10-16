@@ -6,34 +6,30 @@ using WinDnsRecordCreator.Models;
 using WinDnsRecordCreator.Services;
 
 var builder = WebApplication.CreateBuilder(args);
-
 builder.Host.UseWindowsService();
-
 builder.WebHost.UseKestrel(options =>
 {
     options.Listen(IPAddress.Any, 8089);
 });
-
 builder.Services.AddSingleton<IDnsRecordService, DnsRecordService>();
-
 var app = builder.Build();
-
 app.MapPost("/dns/a-record", async (ARecordRequest? request, IDnsRecordService service, CancellationToken cancellationToken) =>
 {
     if (request is null || string.IsNullOrWhiteSpace(request.Subdomain))
-    {
         return Results.BadRequest(new { error = "The 'subdomain' value is required." });
+    try
+    {
+        var fqdn = await service.CreateARecordAsync(request.Subdomain, request.IpAddress, cancellationToken);
+        return Results.Ok(new { message = $"DNS A record created or updated for {fqdn}." });
     }
-
-    var fqdn = await service.CreateARecordAsync(request.Subdomain, cancellationToken);
-
-    return Results.Ok(new { message = $"DNS A record created for {fqdn}." });
+    catch (Exception ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
 })
 .WithName("CreateARecord")
 .Produces(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status400BadRequest)
 .Produces(StatusCodes.Status500InternalServerError);
-
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy" }));
-
 app.Run();

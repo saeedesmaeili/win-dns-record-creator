@@ -45,3 +45,35 @@ Returns HTTP 200 with a small JSON payload when the service is running.
 3. Configure firewall rules if necessary to allow inbound traffic on port `8089`.
 
 > **Note:** The Windows Server must have the DNS role installed and the executing account must have permission to create DNS records in the `mafpars.local` zone.
+
+## Testing the Service
+
+Once the service is installed and running on the target Windows Server you can verify end-to-end behavior with the following steps:
+
+1. **Confirm the service is listening**
+   ```powershell
+   netstat -ano | findstr :8089
+   ```
+   The output should show a `LISTENING` entry bound to port `8089` that maps to the service's process ID.
+
+2. **Send a test request**
+   Use any HTTP client (PowerShell, curl, Postman) to invoke the API. The example below uses PowerShell:
+   ```powershell
+   Invoke-RestMethod -Uri "http://localhost:8089/dns/a-record" -Method Post -Body '{"subdomain":"apitest"}' -ContentType "application/json"
+   ```
+   A successful call returns a `200 OK` response with a confirmation message.
+
+3. **Verify the DNS record exists**
+   Query the DNS zone from the same server (or any machine that can reach the DNS server):
+   ```powershell
+   Resolve-DnsName -Name "apitest.mafpars.local" -Server localhost
+   ```
+   The result should display an `A` record that points to the server's IPv4 address.
+
+4. **Clean up (optional)**
+   If you created the record for testing purposes only, remove it through the DNS Manager MMC snap-in or PowerShell:
+   ```powershell
+   Remove-DnsServerResourceRecord -ZoneName "mafpars.local" -RRType "A" -Name "apitest" -Force
+   ```
+
+If the call returns an error, check the Windows Event Log (`Application` log, source `WinDnsRecordCreator`) for detailed error information emitted by the service's structured logging.
